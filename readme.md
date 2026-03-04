@@ -96,5 +96,6 @@ docker-compose up --build
 
 ### 8. Ghi chú
 
-- Các bước triển khai chi tiết (Terraform/CDK, cấu hình GitHub Actions, ECS, RDS, Route53, ACM, ALB, …) có thể được mô tả thêm trong thư mục `infra/` hoặc tài liệu bổ sung nếu cần.
+- Hạ tầng AWS được định nghĩa bằng các **CloudFormation template (.yaml)** trong thư mục `infra/` (network, security groups, ECS, bastion, parameter store, v.v.).
+- Các bước triển khai chi tiết (tạo/ cập nhật CloudFormation stack, cấu hình GitHub Actions, ECS, RDS, Route53, ACM, ALB, …) có thể được mô tả thêm trong `infra/README.md` hoặc tài liệu bổ sung nếu cần.
 - README này tập trung mô tả **kiến trúc tổng quan**, **cách hệ thống hoạt động** và **cách chạy ứng dụng** dựa trên overview architecture diagram.
