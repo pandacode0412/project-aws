@@ -1,0 +1,410 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation template for SOA Compute Resources - ECS, ALB, Auto Scaling'
+
+Parameters:
+  # Networking Parameters
+  VPCId:
+    Type: AWS::EC2::VPC::Id
+    Description: Select VPC for resources
+
+  PublicSubnet1Id:
+    Type: AWS::EC2::Subnet::Id
+    Description: Select Public Subnet 1
+
+  PublicSubnet2Id:
+    Type: AWS::EC2::Subnet::Id
+    Description: Select Public Subnet 2
+
+  PrivateAppSubnet1Id:
+    Type: AWS::EC2::Subnet::Id
+    Description: Select Private App Subnet 1
+
+  PrivateAppSubnet2Id:
+    Type: AWS::EC2::Subnet::Id
+    Description: Select Private App Subnet 2
+
+  # Security Groups Parameters
+  ALBSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Select ALB Security Group
+
+  AppSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Select App Security Group
+
+  # Service Configuration
+  ServiceName:
+    Type: String
+    Description: Service name
+    Default: codeland-api
+
+  ContainerPort:
+    Type: Number
+    Description: Container port
+    Default: 80
+
+  ContainerCpu:
+    Type: String
+    Description: CPU units for container
+    Default: 256
+
+  ContainerMemory:
+    Type: String
+    Description: Memory for container (MB)
+    Default: 512
+
+  DesiredCount:
+    Type: Number
+    Description: Desired count of ECS tasks
+    Default: 0
+
+  # Auto Scaling Parameters
+  TargetCPUUtilization:
+    Type: Number
+    Description: Target CPU utilization percentage for auto scaling
+    Default: 60
+    MinValue: 10
+    MaxValue: 90
+
+  TargetMemoryUtilization:
+    Type: Number
+    Description: Target Memory utilization percentage for auto scaling
+    Default: 70
+    MinValue: 10
+    MaxValue: 90
+
+  MinCapacity:
+    Type: Number
+    Description: Minimum number of tasks
+    Default: 1
+    MinValue: 1
+
+  MaxCapacity:
+    Type: Number
+    Description: Maximum number of tasks
+    Default: 5
+    MinValue: 1
+
+Resources:
+  # IAM Task Execution Role
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'soa-iam-codeland-${ServiceName}-ecs-execution'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/AmazonSSMFullAccess
+        - arn:aws:iam::aws:policy/SecretsManagerReadWrite
+      Tags:
+        - Key: Name
+          Value: !Sub 'soa-iam-codeland-${ServiceName}-ecs-execution'
+        - Key: Environment
+          Value: develop
+        - Key: SystemID
+          Value: SOA
+
+  # IAM Task Role
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'soa-iam-codeland-${ServiceName}-ecs-task'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/AmazonSSMFullAccess
+        - arn:aws:iam::aws:policy/SecretsManagerReadWrite
+      Tags:
+        - Key: Name
+          Value: !Sub 'soa-iam-codeland-${ServiceName}-ecs-task'
+        - Key: Environment
+          Value: develop
+        - Key: SystemID
+          Value: SOA
+
+  # ECR Repository
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub 'soa-ecr-codeland-${ServiceName}'
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep only 10 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+      Tags:
+        - Key: Name
+          Value: !Sub 'soa-ecr-codeland-${ServiceName}'
+        - Key: Environment
+          Value: develop
+        - Key: SystemID
+          Value: SOA
+
+  # CloudWatch Logs Group
+  CloudWatchLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/ecs/soa-ecs-codeland-${ServiceName}'
+      RetentionInDays: 14
+      Tags:
+        - Key: Name
+          Value: !Sub 'soa-logs-codeland-${ServiceName}'
+        - Key: Environment
+          Value: develop
+        - Key: SystemID
+          Value: SOA
+
+  # Target Group
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub 'soa-tg-codeland-${ServiceName}'
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /users/ping
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Port: !Ref ContainerPort
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !Ref VPCId
+      Tags:
+        - Key: Name
+          Value: !Sub 'soa-tg-codeland-${ServiceName}'
+        - Key: Environment
+          Value: develop
+        - Key: SystemID
+          Value: SOA
+
+  # Application Load Balancer
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub 'soa-alb-codeland-${ServiceName}'
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref ALBSecurityGroupId
+      Subnets:
+        - !Ref PublicSubnet1Id
+        - !Ref PublicSubnet2Id
+      Type: application
+      Tags:
+        - Key: Name
+          Value: !Sub 'soa-alb-codeland-${ServiceName}'
+        - Key: Environment
+          Value: develop
+        - Key: SystemID
+          Value: SOA
+
+  # HTTP Listener
+  HTTPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  # ECS Cluster
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub 'soa-ecs-codeland-${ServiceName}'
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      Tags:
+        - Key: Name
+          Value: !Sub 'soa-ecs-codeland-${ServiceName}'
+        - Key: Environment
+          Value: develop
+        - Key: SystemID
+          Value: SOA
+
+  # ECS Task Definition
+  ECSTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub 'soa-task-codeland-${ServiceName}'
+      Cpu: !Ref ContainerCpu
+      Memory: !Ref ContainerMemory
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: !Sub 'soa-container-codeland-${ServiceName}'
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/soa-ecr-codeland-${ServiceName}:latest'
+          Essential: true
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+          Environment:
+            - Name: FLASK_APP
+              Value: project/__init__.py
+            - Name: FLASK_DEBUG
+              Value: '1'
+            - Name: APP_SETTINGS
+              Value: project.config.DevelopmentConfig
+            - Name: DB_USER
+              Value: postgres
+            - Name: DB_PASSWORD
+              Value: postgres
+            - Name: DB_URL
+              Value: db:5432/dev
+            - Name: SECRET_KEY
+              Value: my_precious
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CloudWatchLogsGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+      Tags:
+        - Key: Name
+          Value: !Sub 'soa-task-codeland-${ServiceName}'
+        - Key: Environment
+          Value: develop
+        - Key: SystemID
+          Value: SOA
+
+  # ECS Service
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: 
+      - HTTPListener
+    Properties:
+      Cluster: !Ref ECSCluster
+      ServiceName: !Sub 'soa-ecs-service-codeland-${ServiceName}'
+      TaskDefinition: !Ref ECSTaskDefinition
+      DesiredCount: !Ref DesiredCount
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+            - !Ref AppSecurityGroupId
+          Subnets:
+            - !Ref PrivateAppSubnet1Id
+            - !Ref PrivateAppSubnet2Id
+      LoadBalancers:
+        - ContainerName: !Sub 'soa-container-codeland-${ServiceName}'
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref TargetGroup
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 50
+      Tags:
+        - Key: Name
+          Value: !Sub 'soa-ecs-service-codeland-${ServiceName}'
+        - Key: Environment
+          Value: develop
+        - Key: SystemID
+          Value: SOA
+
+  # Auto Scaling Target
+  AutoScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    DependsOn: ECSService
+    Properties:
+      ServiceNamespace: ecs
+      ResourceId: !Sub 'service/${ECSCluster}/soa-ecs-service-codeland-${ServiceName}'
+      ScalableDimension: ecs:service:DesiredCount
+      MinCapacity: !Ref MinCapacity
+      MaxCapacity: !Ref MaxCapacity
+      RoleARN: !Sub 'arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService'
+
+  # CPU Scaling Policy
+  CPUScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub 'soa-scaling-policy-codeland-${ServiceName}-cpu'
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: !Ref TargetCPUUtilization
+        ScaleOutCooldown: 300
+        ScaleInCooldown: 300
+
+  # Memory Scaling Policy
+  MemoryScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub 'soa-scaling-policy-codeland-${ServiceName}-memory'
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageMemoryUtilization
+        TargetValue: !Ref TargetMemoryUtilization
+        ScaleOutCooldown: 300
+        ScaleInCooldown: 300
+
+Outputs:
+  ECRRepositoryUri:
+    Description: ECR Repository URI
+    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/soa-ecr-codeland-${ServiceName}'
+    Export:
+      Name: !Sub "${AWS::StackName}-ECRRepositoryUri"
+
+  ALBDnsName:
+    Description: ALB DNS Name
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: !Sub "${AWS::StackName}-ALBDnsName"
+
+  ECSClusterName:
+    Description: ECS Cluster Name
+    Value: !Ref ECSCluster
+    Export:
+      Name: !Sub "${AWS::StackName}-ECSClusterName"
+
+  ECSServiceName:
+    Description: ECS Service Name
+    Value: !GetAtt ECSService.Name
+    Export:
+      Name: !Sub "${AWS::StackName}-ECSServiceName"
+
+  TaskExecutionRoleArn:
+    Description: Task Execution Role ARN
+    Value: !GetAtt TaskExecutionRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-TaskExecutionRoleArn"
+
+  TaskRoleArn:
+    Description: Task Role ARN
+    Value: !GetAtt TaskRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-TaskRoleArn"

@@ -1,0 +1,239 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation template for SOA Bastion Host'
+
+Parameters:
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the bastion host
+    ConstraintDescription: Must be the name of an existing EC2 KeyPair
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID where the bastion host will be deployed
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Public subnet ID where the bastion host will be deployed
+
+  SecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security Group ID for the bastion host
+
+  InstanceType:
+    Type: String
+    Description: EC2 instance type for bastion host
+    AllowedValues:
+      - t2.micro
+      - t3.micro
+      - t3.small
+      - t3.medium
+    Default: t3.micro
+    ConstraintDescription: Must select a valid instance type
+
+Resources:
+  # IAM Role for Bastion Host
+  BastionHostRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: soa-iam-codeland-bastion-host
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/AmazonSSMFullAccess
+        - arn:aws:iam::aws:policy/SecretsManagerReadWrite
+      Tags:
+        - Key: Name
+          Value: soa-iam-codeland-bastion-host
+        - Key: Environment
+          Value: develop
+        - Key: SystemID
+          Value: SOA
+
+  # Instance Profile for Bastion Host
+  BastionHostInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: soa-iam-codeland-bastion-host
+      Roles:
+        - !Ref BastionHostRole
+
+  # Bastion Host EC2 Instance
+  BastionHostInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64}}'
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyPairName
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref SecurityGroupId
+      IamInstanceProfile: !Ref BastionHostInstanceProfile
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          
+          # Install SSM agent (should be pre-installed on AL2023 but ensure it's running)
+          yum install -y amazon-ssm-agent
+          systemctl enable amazon-ssm-agent
+          systemctl start amazon-ssm-agent
+          
+          # Install PostgreSQL client version 17
+          dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+          dnf install -y postgresql17
+          
+          # Install Git
+          yum install -y git
+          
+          # Install Node.js (using NodeSource repository for latest LTS)
+          curl -fsSL https://rpm.nodesource.com/setup_lts.x | bash -
+          yum install -y nodejs
+          
+          # Install pnpm globally
+          npm install -g pnpm
+          
+          # Install AWS CLI v2 (if not already installed)
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip
+          ./aws/install
+          rm -rf awscliv2.zip aws/
+          
+          # Create a working directory for projects
+          mkdir -p /home/ec2-user/projects
+          chown ec2-user:ec2-user /home/ec2-user/projects
+          
+          # Install additional useful tools
+          yum install -y htop tree wget curl vim nano jq
+          
+          # Install Docker
+          yum install -y docker
+          systemctl enable docker
+          systemctl start docker
+          usermod -aG docker ec2-user
+          
+          # Install Docker Compose
+          curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+          chmod +x /usr/local/bin/docker-compose
+          ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose
+
+          # Install buildx version
+          curl -sSfL https://github.com/docker/buildx/releases/download/v0.17.1/buildx-v0.17.1.linux-amd64 -o /usr/libexec/docker/cli-plugins/docker-buildx
+          chmod +x /usr/libexec/docker/cli-plugins/docker-buildx
+          docker buildx install
+
+          # Create helper scripts for database connection
+          cat > /home/ec2-user/connect-db.sh << 'EOF'
+          #!/bin/bash
+          # Helper script to connect to PostgreSQL database using credentials from Secrets Manager
+          
+          # Get secret name from Parameter Store
+          DB_SECRET_NAME=$(aws ssm get-parameter \
+            --name "soa-param-codeland-db-secret-name" \
+            --query "Parameter.Value" --output text)
+          
+          # Get database credentials from Secrets Manager using the secret name
+          DB_SECRET=$(aws secretsmanager get-secret-value \
+            --secret-id "$DB_SECRET_NAME" \
+            --query SecretString --output text)
+          
+          DB_USERNAME=$(echo $DB_SECRET | jq -r .username)
+          DB_PASSWORD=$(echo $DB_SECRET | jq -r .password)
+          
+          # Get database URL from Parameter Store
+          DB_URL=$(aws ssm get-parameter \
+            --name "soa-param-codeland-db-url" \
+            --query "Parameter.Value" --output text)
+          
+          # Parse DB_URL to extract host, port, and database name
+          # Format: hostname:port/dbname
+          DB_HOST=$DB_URL
+          DB_PORT=5432
+          DB_NAME=dev
+          
+          echo "Connecting to PostgreSQL database at $DB_HOST:$DB_PORT/$DB_NAME..."
+          PGPASSWORD=$DB_PASSWORD psql -h $DB_HOST -p $DB_PORT -U $DB_USERNAME -d $DB_NAME
+          EOF
+          
+          chmod +x /home/ec2-user/connect-db.sh
+          chown ec2-user:ec2-user /home/ec2-user/connect-db.sh
+          
+          # Create a script to get SOA parameters
+          cat > /home/ec2-user/get-soa-params.sh << 'EOF'
+          #!/bin/bash
+          # Helper script to get SOA parameters from Systems Manager
+          
+          echo "=== SOA Parameters ==="
+          echo "Secret Key:"
+          aws ssm get-parameter --name "soa-param-codeland-secret-key" --query "Parameter.Value" --output text
+          echo ""
+          echo "DB URL:"
+          aws ssm get-parameter --name "soa-param-codeland-db-url" --query "Parameter.Value" --output text
+          echo ""
+          EOF
+          
+          chmod +x /home/ec2-user/get-soa-params.sh
+          chown ec2-user:ec2-user /home/ec2-user/get-soa-params.sh
+          
+          # Signal that the instance is ready
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource BastionHostInstance --region ${AWS::Region}
+      Tags:
+        - Key: Name
+          Value: soa-ec2-codeland-bastion-host
+        - Key: Environment
+          Value: develop
+        - Key: SystemID
+          Value: SOA
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT10M
+        Count: 1
+
+Outputs:
+  BastionHostInstanceId:
+    Description: Instance ID of the Bastion Host
+    Value: !Ref BastionHostInstance
+    Export:
+      Name: !Sub "${AWS::StackName}-BastionHostInstanceId"
+
+  BastionHostPrivateIP:
+    Description: Private IP address of the Bastion Host
+    Value: !GetAtt BastionHostInstance.PrivateIp
+    Export:
+      Name: !Sub "${AWS::StackName}-BastionHostPrivateIP"
+
+  BastionHostPublicIP:
+    Description: Public IP address of the Bastion Host
+    Value: !GetAtt BastionHostInstance.PublicIp
+    Export:
+      Name: !Sub "${AWS::StackName}-BastionHostPublicIP"
+
+  BastionHostRoleArn:
+    Description: ARN of the Bastion Host IAM Role
+    Value: !GetAtt BastionHostRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-BastionHostRoleArn"
+
+  SSMSessionCommand:
+    Description: Command to connect to bastion via SSM Session Manager
+    Value: !Sub "aws ssm start-session --target ${BastionHostInstance} --region ${AWS::Region}"
+    Export:
+      Name: !Sub "${AWS::StackName}-SSMSessionCommand"
+
+  DatabaseConnectionScript:
+    Description: Command to connect to database from bastion
+    Value: "/home/ec2-user/connect-db.sh"
+    Export:
+      Name: !Sub "${AWS::StackName}-DatabaseConnectionScript"
+
+  SOAParametersScript:
+    Description: Command to get SOA parameters from bastion
+    Value: "/home/ec2-user/get-soa-params.sh"
+    Export:
+      Name: !Sub "${AWS::StackName}-SOAParametersScript"

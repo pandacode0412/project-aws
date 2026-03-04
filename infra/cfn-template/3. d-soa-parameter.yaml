@@ -1,0 +1,79 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation template for SOA Systems Manager Parameters'
+
+Resources:
+  # Secret Key Parameter
+  SecretKeyParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: soa-param-codeland-secret-key
+      Type: String
+      Value: 'my_precious'
+      Description: 'Secret key for SOA application encryption'
+      Tags:
+        Name: soa-param-codeland-secret-key
+        Environment: develop
+        SystemID: SOA
+
+  # Database URL Parameter
+  DatabaseURLParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: soa-param-codeland-db-url
+      Type: String
+      Value: 'database-endpoint'
+      Description: 'PostgreSQL database connection URL for SOA application'
+      Tags:
+        Name: soa-param-codeland-db-url
+        Environment: develop
+        SystemID: SOA
+
+  # Database Secret Name Parameter
+  DatabaseSecretNameParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: soa-param-codeland-db-secret-name
+      Type: String
+      Value: 'rds!db-...'
+      Description: 'RDS secret name for SOA application database access'
+      Tags:
+        Name: soa-param-codeland-db-secret-name
+        Environment: develop
+        SystemID: SOA
+
+Outputs:
+  SecretKeyParameterName:
+    Description: Secret Key Parameter Name
+    Value: !Ref SecretKeyParameter
+    Export:
+      Name: !Sub "${AWS::StackName}-SecretKeyParameterName"
+
+  DatabaseURLParameterName:
+    Description: Database URL Parameter Name
+    Value: !Ref DatabaseURLParameter
+    Export:
+      Name: !Sub "${AWS::StackName}-DatabaseURLParameterName"
+
+  DatabaseSecretNameParameterName:
+    Description: Database Secret Name Parameter Name
+    Value: !Ref DatabaseSecretNameParameter
+    Export:
+      Name: !Sub "${AWS::StackName}-DatabaseSecretNameParameterName"
+
+  SecretKeyParameterArn:
+    Description: Secret Key Parameter ARN
+    Value: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${SecretKeyParameter}'
+    Export:
+      Name: !Sub "${AWS::StackName}-SecretKeyParameterArn"
+
+  DatabaseURLParameterArn:
+    Description: Database URL Parameter ARN
+    Value: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${DatabaseURLParameter}'
+    Export:
+      Name: !Sub "${AWS::StackName}-DatabaseURLParameterArn"
+
+  DatabaseSecretNameParameterArn:
+    Description: Database Secret Name Parameter ARN
+    Value: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${DatabaseSecretNameParameter}'
+    Export:
+      Name: !Sub "${AWS::StackName}-DatabaseSecretNameParameterArn"
